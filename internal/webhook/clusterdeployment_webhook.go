@@ -280,7 +280,7 @@ func isCredMatchTemplate(cred *kcmv1.Credential, template *kcmv1.ClusterTemplate
 	const secretKind = "Secret"
 
 	for _, provider := range template.Status.Providers {
-		if provider == providersloader.InfraPrefix+"internal" {
+		if slices.Contains([]string{providersloader.InfraPrefix + "internal", providersloader.InfraPrefix + "k0sproject-k0smotron"}, provider) {
 			if idtyKind != secretKind {
 				return errMsg(provider)
 			}
