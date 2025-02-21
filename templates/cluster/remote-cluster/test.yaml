@@ -1,0 +1,29 @@
+machines:
+  - user: root
+    port: 2202
+    address: 1.2.3.4
+  - user: ubuntu
+    useSudo: true
+    address: 1.2.3.6
+    k0s:
+      args:
+      - "b"
+    provisionJob:
+      jobSpecTemplate:
+        spec:
+          alidjlad: alfialjf
+  - address: 2.3.4.5
+
+k0s:
+  api:
+    extraArgs:
+      a: "1"
+  extensions:
+    helm:
+      charts:
+      - name: ahash
+
+k0smotron:
+  controllerPlaneFlags:
+  - "asjjsa"
+
