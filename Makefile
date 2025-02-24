@@ -149,7 +149,7 @@ lint-fix: golangci-lint fmt vet ## Run golangci-lint linter and perform fixes
 
 .PHONY: add-license
 add-license: addlicense
-	$(ADDLICENSE) -c "" -ignore ".github/**" -ignore "config/**" -ignore "templates/**" -ignore "bin/**" -ignore ".*" .
+	$(ADDLICENSE) -c "" -ignore ".github/**" -ignore "config/**" -ignore "templates/**" -ignore "providers/**" -ignore "bin/**" -ignore ".*" .
 
 ##@ Package
 

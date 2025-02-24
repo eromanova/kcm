@@ -27,6 +27,7 @@ import (
 // YAMLProviderDefinition represents a YAML-based provider configuration.
 type YAMLProviderDefinition struct {
 	Name                 string                    `yaml:"name"`
+	ComponentName        string                    `yaml:"componentName,omitempty"`
 	ClusterGVKs          []schema.GroupVersionKind `yaml:"clusterGVKs"`
 	ClusterIdentityKinds []string                  `yaml:"clusterIdentityKinds"`
 }
@@ -35,6 +36,13 @@ var _ ProviderModule = (*YAMLProviderDefinition)(nil)
 
 func (p *YAMLProviderDefinition) GetName() string {
 	return p.Name
+}
+
+func (p *YAMLProviderDefinition) GetComponentName() string {
+	if p.ComponentName == "" {
+		return ProviderPrefix + p.Name
+	}
+	return p.ComponentName
 }
 
 func (p *YAMLProviderDefinition) GetClusterGVKs() []schema.GroupVersionKind {

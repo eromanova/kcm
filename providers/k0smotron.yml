@@ -1,7 +1,8 @@
-name: openstack
+name: k0sproject-k0smotron
+componentName: k0smotron
 clusterGVKs:
   - group: infrastructure.cluster.x-k8s.io
     version: v1beta1
-    kind: OpenStackCluster
+    kind: RemoteCluster
 clusterIdentityKinds:
   - Secret

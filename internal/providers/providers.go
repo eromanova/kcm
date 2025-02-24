@@ -37,9 +37,6 @@ var (
 
 	providers = []kcm.Provider{
 		{
-			Name: kcm.ProviderK0smotronName,
-		},
-		{
 			Name: kcm.ProviderSveltosName,
 		},
 	}
@@ -50,6 +47,8 @@ var (
 type ProviderModule interface {
 	// GetName returns the short name of the provider
 	GetName() string
+	// GetComponentName retrieves the name of the component associated with this provider
+	GetComponentName() string
 	// GetClusterGVKs returns the GroupVersionKind for the provider's cluster resource
 	GetClusterGVKs() []schema.GroupVersionKind
 	// GetClusterIdentityKinds returns a list of supported cluster identity kinds
@@ -73,7 +72,7 @@ func Register(p ProviderModule) {
 
 	providers = append(providers,
 		kcm.Provider{
-			Name: ProviderPrefix + p.GetName(),
+			Name: p.GetComponentName(),
 		},
 	)
 
