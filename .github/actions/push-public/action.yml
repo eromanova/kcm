@@ -23,11 +23,11 @@ runs:
       uses: docker/build-push-action@v6
       with:
         build-args: |
-          LD_FLAGS=-s -w -X github.com/K0rdent/kcm/internal/build.Version=${{ inputs.version }}
+          LD_FLAGS=-s -w -X github.com/eromanova/kcm/internal/build.Version=${{ inputs.version }}
         context: .
         platforms: linux/amd64
         tags: |
-          ghcr.io/k0rdent/kcm/controller-ci:${{ inputs.version }}
+          ghcr.io/eromanova/kcm/controller-ci:${{ inputs.version }}
         push: true
         cache-from: type=gha
         cache-to: type=gha,mode=max

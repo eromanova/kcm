@@ -141,7 +141,7 @@ jobs:
     permissions:
       packages: write
     env:
-      REGISTRY_REPO: oci://ghcr.io/k0rdent/kcm/charts-ci
+      REGISTRY_REPO: oci://ghcr.io/eromanova/kcm/charts-ci
     steps:
       - name: Checkout repository
         if: ${{ needs.authorize.outputs.public_repo == 'true' }}
@@ -168,7 +168,7 @@ jobs:
           context: .
           platforms: linux/amd64
           tags: |
-            ghcr.io/k0rdent/kcm/controller-ci:${{ needs.lint-test.outputs.version }}
+            ghcr.io/eromanova/kcm/controller-ci:${{ needs.lint-test.outputs.version }}
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -211,8 +211,8 @@ jobs:
       - name: Set public registry env variables
         if: ${{ env.PUBLIC_REPO == 'true' }}
         run: |
-          echo "REGISTRY_REPO=oci://ghcr.io/k0rdent/kcm/charts-ci" >> $GITHUB_ENV
-          echo "IMG=ghcr.io/k0rdent/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
+          echo "REGISTRY_REPO=oci://ghcr.io/eromanova/kcm/charts-ci" >> $GITHUB_ENV
+          echo "IMG=ghcr.io/eromanova/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -279,8 +279,8 @@ jobs:
       - name: Set public registry env variables
         if: ${{ env.PUBLIC_REPO == 'true' }}
         run: |
-          echo "REGISTRY_REPO=oci://ghcr.io/k0rdent/kcm/charts-ci" >> $GITHUB_ENV
-          echo "IMG=ghcr.io/k0rdent/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
+          echo "REGISTRY_REPO=oci://ghcr.io/eromanova/kcm/charts-ci" >> $GITHUB_ENV
+          echo "IMG=ghcr.io/eromanova/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
