@@ -162,8 +162,8 @@ jobs:
       - name: Set public registry env variables
         if: ${{ env.PUBLIC_REPO == 'true' }}
         run: |
-          echo "REGISTRY_REPO=oci://ghcr.io/k0rdent/kcm/charts-ci" >> $GITHUB_ENV
-          echo "IMG=ghcr.io/k0rdent/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
+          echo "REGISTRY_REPO=oci://ghcr.io/eromanova/kcm/charts-ci" >> $GITHUB_ENV
+          echo "IMG=ghcr.io/eromanova/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -237,8 +237,8 @@ jobs:
       - name: Set public registry env variables
         if: ${{ env.PUBLIC_REPO == 'true' }}
         run: |
-          echo "REGISTRY_REPO=oci://ghcr.io/k0rdent/kcm/charts-ci" >> $GITHUB_ENV
-          echo "IMG=ghcr.io/k0rdent/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
+          echo "REGISTRY_REPO=oci://ghcr.io/eromanova/kcm/charts-ci" >> $GITHUB_ENV
+          echo "IMG=ghcr.io/eromanova/kcm/controller-ci:${{ needs.lint-test.outputs.version }}" >> $GITHUB_ENV
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
