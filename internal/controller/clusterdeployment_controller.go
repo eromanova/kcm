@@ -60,6 +60,7 @@ import (
 	conditionsutil "github.com/K0rdent/kcm/internal/utils/conditions"
 	"github.com/K0rdent/kcm/internal/utils/kube"
 	"github.com/K0rdent/kcm/internal/utils/ratelimit"
+	schemeutil "github.com/K0rdent/kcm/internal/utils/scheme"
 	"github.com/K0rdent/kcm/internal/utils/validation"
 )
 
@@ -169,7 +170,7 @@ func (r *ClusterDeploymentReconciler) getClusterScope(ctx context.Context, cd *k
 		if err := r.MgmtClient.Get(ctx, client.ObjectKey{Name: cred.Spec.Region}, rgn); err != nil {
 			return clusterScope{}, fmt.Errorf("failed to get %s region: %w", cred.Spec.Region, err)
 		}
-		if scope.rgnClient, _, err = region.GetClient(ctx, r.MgmtClient, r.SystemNamespace, rgn); err != nil {
+		if scope.rgnClient, _, err = region.GetClient(ctx, r.MgmtClient, r.SystemNamespace, rgn, schemeutil.GetRegionalScheme); err != nil {
 			return clusterScope{}, fmt.Errorf("failed to get client for %s region: %w", cred.Spec.Region, err)
 		}
 		scope.region = rgn
@@ -764,6 +765,23 @@ func (r *ClusterDeploymentReconciler) reconcileDelete(ctx context.Context, mgmt 
 			return ctrl.Result{}, nil
 		}
 
+		return ctrl.Result{}, err
+	}
+
+	serviceSet := &kcmv1.ServiceSet{}
+	err = r.MgmtClient.Get(ctx, client.ObjectKeyFromObject(cd), serviceSet)
+	if err == nil { // if NO error
+		if err := r.MgmtClient.Delete(ctx, serviceSet); err != nil {
+			r.setCondition(cd, kcmv1.DeletingCondition, err)
+			return ctrl.Result{}, err
+		}
+
+		l.Info("ServiceSet still exists, retrying", "name", client.ObjectKeyFromObject(cd))
+		return ctrl.Result{RequeueAfter: r.defaultRequeueTime}, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		r.setCondition(cd, kcmv1.DeletingCondition, err)
+		l.Error(err, "failed to get ServiceSet")
 		return ctrl.Result{}, err
 	}
 

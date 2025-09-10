@@ -42,6 +42,7 @@ import (
 	"github.com/K0rdent/kcm/internal/record"
 	"github.com/K0rdent/kcm/internal/utils"
 	"github.com/K0rdent/kcm/internal/utils/ratelimit"
+	schemeutil "github.com/K0rdent/kcm/internal/utils/scheme"
 )
 
 // Reconciler reconciles a Region object
@@ -149,7 +150,7 @@ func (r *Reconciler) update(ctx context.Context, region *kcmv1.Region) (result c
 		},
 	}
 
-	rgnlClient, restCfg, err := GetClient(ctx, r.MgmtClient, r.SystemNamespace, region)
+	rgnlClient, restCfg, err := GetClient(ctx, r.MgmtClient, r.SystemNamespace, region, schemeutil.GetRegionalScheme)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get clients for the %s region: %w", region.Name, err)
 	}
