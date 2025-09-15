@@ -114,6 +114,8 @@ func isCredIdentitySupportsClusterTemplate(ctx context.Context, mgmtClient clien
 }
 
 type parentObject interface {
+	client.Object
+
 	HelmReleaseName(string) string
 	GetComponentsStatus() *kcmv1.ComponentsCommonStatus
 }
