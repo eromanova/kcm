@@ -49,6 +49,9 @@ type CredentialStatus struct {
 
 	// Conditions contains details for the current state of the Credential.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedGeneration is the last observed generation.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// +kubebuilder:default:=false
 
 	// Ready holds the readiness of Credentials.

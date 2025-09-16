@@ -124,6 +124,7 @@ func (r *CredentialReconciler) updateStatus(ctx context.Context, cred *kcmv1.Cre
 		}
 	}
 
+	cred.Status.ObservedGeneration = cred.Generation
 	if err := r.MgmtClient.Status().Update(ctx, cred); err != nil {
 		return fmt.Errorf("failed to update Credential %s/%s status: %w", cred.Namespace, cred.Name, err)
 	}
