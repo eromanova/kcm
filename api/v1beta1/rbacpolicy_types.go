@@ -30,61 +30,79 @@ const ClusterRoleBindingNamePrefix = "k0rdent-"
 // actually asserts (a ClusterAuthentication's JWT claim mapping, some other identity provider, or
 // none at all) — for example "k0rdent:project:project-2:compute-admin".
 type RBACPolicySubject struct {
+	// +required
 	// +kubebuilder:validation:Enum=User;Group
-
-	// Kind is the Kubernetes RBAC subject kind: "User" or "Group".
-	Kind string `json:"kind"`
-
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
 
-	// Name is the exact subject name (see the RBACPolicySubject doc comment).
-	Name string `json:"name"`
+	// kind is the Kubernetes RBAC subject kind: "User" or "Group".
+	Kind string `json:"kind,omitempty"`
+
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+
+	// name is the exact subject name (see the RBACPolicySubject doc comment).
+	Name string `json:"name,omitempty"`
 }
 
 // RBACPolicyBinding maps a single Kubernetes ClusterRole to the exact set of ClusterRoleBinding
 // subjects that should be bound to it in the targeted child cluster.
 type RBACPolicyBinding struct {
+	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
 
-	// Name identifies this binding within the policy (for example "compute-admin"). It is used to
+	// name identifies this binding within the policy (for example "compute-admin"). It is used to
 	// name the generated ClusterRoleBinding ("k0rdent-<name>").
-	Name string `json:"name"`
+	Name string `json:"name,omitempty"`
 
+	// +required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 
-	// ClusterRole is the name of the Kubernetes ClusterRole that Name is bound to in the child
+	// clusterRole is the name of the Kubernetes ClusterRole that Name is bound to in the child
 	// cluster. It may be a built-in ClusterRole (e.g. "admin", "edit", "view") or a custom one,
 	// either already present in the child cluster or defined inline via Rules.
-	ClusterRole string `json:"clusterRole"`
+	ClusterRole string `json:"clusterRole,omitempty"`
 
-	// Rules optionally supplies the PolicyRules for the ClusterRole named by ClusterRole, for the case
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=0
+	// +kubebuilder:validation:MaxItems=32768
+
+	// rules optionally supplies the PolicyRules for the ClusterRole named by ClusterRole, for the case
 	// where that ClusterRole does not already exist in the child cluster (e.g. a custom role). When
 	// set, the operator creates/updates that ClusterRole (with these rules) alongside the
 	// ClusterRoleBinding. Leave unset to bind to a ClusterRole that is expected to already exist
 	// (e.g. a built-in role) — the operator never modifies a ClusterRole it did not create.
 	Rules []rbacv1.PolicyRule `json:"rules,omitempty"`
 
+	// +required
+	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32768
 
-	// Subjects is the ClusterRoleBinding subject list for this binding. See RBACPolicySubject.
-	Subjects []RBACPolicySubject `json:"subjects"`
+	// subjects is the ClusterRoleBinding subject list for this binding. See RBACPolicySubject.
+	Subjects []RBACPolicySubject `json:"subjects,omitempty"`
 }
 
 // RBACPolicySpec defines the role catalog: a set of ClusterRole -> subjects bindings that the RBAC
 // operator reconciles into the child cluster of the [ClusterDeployment] that references this
 // RBACPolicy via spec.rbacPolicy.
 type RBACPolicySpec struct {
+	// +required
+	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=200
 
-	// Bindings is the role catalog: each entry maps one ClusterRole to a set of subjects,
+	// bindings is the role catalog: each entry maps one ClusterRole to a set of subjects,
 	// materialized as a ClusterRoleBinding in the child cluster of the referencing ClusterDeployment.
-	Bindings []RBACPolicyBinding `json:"bindings"`
+	Bindings []RBACPolicyBinding `json:"bindings,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=rbacpol
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Age"
 
 // RBACPolicy is the Schema for the rbacpolicies API.
 //
@@ -96,7 +114,9 @@ type RBACPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec RBACPolicySpec `json:"spec,omitempty"`
+	// +required
+
+	Spec RBACPolicySpec `json:"spec,omitempty,omitzero"`
 }
 
 // +kubebuilder:object:root=true

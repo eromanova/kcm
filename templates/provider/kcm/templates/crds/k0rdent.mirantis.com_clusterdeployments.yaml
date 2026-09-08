@@ -196,8 +196,10 @@ spec:
                   type: boolean
                 rbacPolicy:
                   description: |-
-                    RBACPolicy string is the name reference to the related [RBACPolicy] object located in the same namespace
+                    rbacPolicy string is the name reference to the related [RBACPolicy] object located in the same namespace
                     containing RBAC policy configuration.
+                  maxLength: 256
+                  minLength: 1
                   type: string
                 serviceSpec:
                   description: ServiceSpec is spec related to deployment of services.

@@ -125,7 +125,11 @@ type ClusterDeploymentSpec struct {
 	// AuditPolicy is the name reference to the related [ClusterAuditPolicy] object located in the same namespace
 	// containing audit policy configuration.
 	AuditPolicy string `json:"auditPolicy,omitempty"`
-	// RBACPolicy string is the name reference to the related [RBACPolicy] object located in the same namespace
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+
+	// rbacPolicy string is the name reference to the related [RBACPolicy] object located in the same namespace
 	// containing RBAC policy configuration.
 	RBACPolicy string `json:"rbacPolicy,omitempty"`
 	// IPAMClaim defines IP Address Management (IPAM) requirements for the cluster.

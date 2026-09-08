@@ -17,12 +17,7 @@ spec:
     singular: rbacpolicy
   scope: Namespaced
   versions:
-    - additionalPrinterColumns:
-        - description: Age
-          jsonPath: .metadata.creationTimestamp
-          name: Age
-          type: date
-      name: v1beta1
+    - name: v1beta1
       schema:
         openAPIV3Schema:
           description: |-
@@ -58,7 +53,7 @@ spec:
               properties:
                 bindings:
                   description: |-
-                    Bindings is the role catalog: each entry maps one ClusterRole to a set of subjects,
+                    bindings is the role catalog: each entry maps one ClusterRole to a set of subjects,
                     materialized as a ClusterRoleBinding in the child cluster of the referencing ClusterDeployment.
                   items:
                     description: |-
@@ -67,20 +62,22 @@ spec:
                     properties:
                       clusterRole:
                         description: |-
-                          ClusterRole is the name of the Kubernetes ClusterRole that Name is bound to in the child
+                          clusterRole is the name of the Kubernetes ClusterRole that Name is bound to in the child
                           cluster. It may be a built-in ClusterRole (e.g. "admin", "edit", "view") or a custom one,
                           either already present in the child cluster or defined inline via Rules.
+                        maxLength: 253
                         minLength: 1
                         type: string
                       name:
                         description: |-
-                          Name identifies this binding within the policy (for example "compute-admin"). It is used to
+                          name identifies this binding within the policy (for example "compute-admin"). It is used to
                           name the generated ClusterRoleBinding ("k0rdent-<name>").
+                        maxLength: 256
                         minLength: 1
                         type: string
                       rules:
                         description: |-
-                          Rules optionally supplies the PolicyRules for the ClusterRole named by ClusterRole, for the case
+                          rules optionally supplies the PolicyRules for the ClusterRole named by ClusterRole, for the case
                           where that ClusterRole does not already exist in the child cluster (e.g. a custom role). When
                           set, the operator creates/updates that ClusterRole (with these rules) alongside the
                           ClusterRoleBinding. Leave unset to bind to a ClusterRole that is expected to already exist
@@ -92,7 +89,7 @@ spec:
                           properties:
                             apiGroups:
                               description: |-
-                                APIGroups is the name of the APIGroup that contains the resources.  If multiple API groups are specified, any action requested against one of
+                                apiGroups is the name of the APIGroup that contains the resources.  If multiple API groups are specified, any action requested against one of
                                 the enumerated resources in any API group will be allowed. "" represents the core API group and "*" represents all API groups.
                               items:
                                 type: string
@@ -100,7 +97,7 @@ spec:
                               x-kubernetes-list-type: atomic
                             nonResourceURLs:
                               description: |-
-                                NonResourceURLs is a set of partial urls that a user should have access to.  *s are allowed, but only as the full, final step in the path
+                                nonResourceURLs is a set of partial urls that a user should have access to.  *s are allowed, but only as the full, final step in the path
                                 Since non-resource URLs are not namespaced, this field is only applicable for ClusterRoles referenced from a ClusterRoleBinding.
                                 Rules can either apply to API resources (such as "pods" or "secrets") or non-resource URL paths (such as "/api"),  but not both.
                               items:
@@ -108,19 +105,19 @@ spec:
                               type: array
                               x-kubernetes-list-type: atomic
                             resourceNames:
-                              description: ResourceNames is an optional white list of names that the rule applies to.  An empty set means that everything is allowed.
+                              description: resourceNames is an optional white list of names that the rule applies to.  An empty set means that everything is allowed.
                               items:
                                 type: string
                               type: array
                               x-kubernetes-list-type: atomic
                             resources:
-                              description: Resources is a list of resources this rule applies to. '*' represents all resources.
+                              description: resources is a list of resources this rule applies to. '*' represents all resources.
                               items:
                                 type: string
                               type: array
                               x-kubernetes-list-type: atomic
                             verbs:
-                              description: Verbs is a list of Verbs that apply to ALL the ResourceKinds contained in this rule. '*' represents all verbs.
+                              description: verbs is a list of Verbs that apply to ALL the ResourceKinds contained in this rule. '*' represents all verbs.
                               items:
                                 type: string
                               type: array
@@ -128,9 +125,12 @@ spec:
                           required:
                             - verbs
                           type: object
+                        maxItems: 32768
+                        minItems: 0
                         type: array
+                        x-kubernetes-list-type: atomic
                       subjects:
-                        description: Subjects is the ClusterRoleBinding subject list for this binding. See RBACPolicySubject.
+                        description: subjects is the ClusterRoleBinding subject list for this binding. See RBACPolicySubject.
                         items:
                           description: |-
                             RBACPolicySubject names one ClusterRoleBinding subject.
@@ -141,21 +141,26 @@ spec:
                             none at all) — for example "k0rdent:project:project-2:compute-admin".
                           properties:
                             kind:
-                              description: 'Kind is the Kubernetes RBAC subject kind: "User" or "Group".'
+                              description: 'kind is the Kubernetes RBAC subject kind: "User" or "Group".'
                               enum:
                                 - User
                                 - Group
+                              maxLength: 1024
+                              minLength: 1
                               type: string
                             name:
-                              description: Name is the exact subject name (see the RBACPolicySubject doc comment).
+                              description: name is the exact subject name (see the RBACPolicySubject doc comment).
+                              maxLength: 256
                               minLength: 1
                               type: string
                           required:
                             - kind
                             - name
                           type: object
+                        maxItems: 32768
                         minItems: 1
                         type: array
+                        x-kubernetes-list-type: atomic
                     required:
                       - clusterRole
                       - name
@@ -164,10 +169,12 @@ spec:
                   maxItems: 200
                   minItems: 1
                   type: array
+                  x-kubernetes-list-type: atomic
               required:
                 - bindings
               type: object
+          required:
+            - spec
           type: object
       served: true
       storage: true
-      subresources: {}
