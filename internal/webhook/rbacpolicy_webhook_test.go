@@ -141,10 +141,7 @@ func TestRBACPolicyValidateUpdate(t *testing.T) {
 	}
 }
 
-//nolint:dupl
 func TestRBACPolicyValidateDelete(t *testing.T) {
-	g := NewWithT(t)
-
 	ctx := t.Context()
 
 	const (
@@ -189,6 +186,7 @@ func TestRBACPolicyValidateDelete(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
 			c := fake.NewClientBuilder().
 				WithScheme(scheme.Scheme).
 				WithRuntimeObjects(tt.existingObjects...).

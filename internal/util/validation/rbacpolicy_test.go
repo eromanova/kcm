@@ -101,17 +101,16 @@ func TestValidateRBACPolicy(t *testing.T) {
 					}},
 				},
 			})),
-			err: `duplicate subject User "alice" for clusterRole "admin"`,
+			err: `binding "compute-admin": duplicate subject User "alice"`,
 		},
 		{
-			name: "same subject in two bindings for the same clusterRole",
+			name: "same subject in two bindings sharing a clusterRole is valid",
 			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
 				Bindings: []kcmv1.RBACPolicyBinding{
-					{Name: "compute-admin", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
-					{Name: "compute-admin-2", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
+					{Name: "team-a-view", ClusterRole: "view", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}, {Kind: rbacv1.UserKind, Name: "bob"}}},
+					{Name: "team-b-view", ClusterRole: "view", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "bob"}, {Kind: rbacv1.UserKind, Name: "carol"}}},
 				},
 			})),
-			err: `duplicate subject User "alice" for clusterRole "admin"`,
 		},
 		{
 			name: "same subject for different clusterRoles is valid",

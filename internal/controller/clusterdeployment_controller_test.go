@@ -2642,7 +2642,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		r := &ClusterDeploymentReconciler{MgmtClient: mgmtCl}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		g.Expect(res).To(Equal(ctrl.Result{}))
 		g.Expect(meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)).To(BeNil())
@@ -2656,7 +2656,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		r := &ClusterDeploymentReconciler{MgmtClient: mgmtCl, defaultRequeueTime: 5 * time.Second}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		g.Expect(res).To(Equal(ctrl.Result{})) // no retry loop chasing a Secret that will never appear
 		g.Expect(meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)).To(BeNil())
@@ -2676,12 +2676,12 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
 
-		_, err := r.ensureRBACPolicy(context.Background(), scope)
+		_, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		cond := meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)
 		g.Expect(cond).NotTo(BeNil())
 		g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(childCl.Get(context.Background(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, &rbacv1.ClusterRoleBinding{})).To(Succeed())
+		g.Expect(childCl.Get(t.Context(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, &rbacv1.ClusterRoleBinding{})).To(Succeed())
 	})
 
 	t.Run("a deleted RBACPolicy revokes access and keeps the reference visible", func(t *testing.T) {
@@ -2701,15 +2701,70 @@ func Test_ensureRBACPolicy(t *testing.T) {
 				return childCl, nil
 			},
 		}
-		// rbacPolicy left nil: getClusterScope could not resolve it
-		scope := &clusterScope{cd: cd, rgnClient: mgmtCl}
+		// rbacPolicy left nil: getClusterScope could not resolve it, but a sync had succeeded before
+		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacSynced: true}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		g.Expect(res).To(Equal(ctrl.Result{}))
-		g.Expect(apierrors.IsNotFound(childCl.Get(context.Background(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, &rbacv1.ClusterRoleBinding{}))).To(BeTrue())
+		g.Expect(apierrors.IsNotFound(childCl.Get(t.Context(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, &rbacv1.ClusterRoleBinding{}))).To(BeTrue())
 		// the dangling spec.rbacPolicy stays reported
 		g.Expect(meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)).NotTo(BeNil())
+	})
+
+	t.Run("a reference that never synced does not touch the child cluster", func(t *testing.T) {
+		g := NewWithT(t)
+		cd := newCD("typo", "test-auth")
+		meta.SetStatusCondition(&cd.Status.Conditions, metav1.Condition{
+			Type: kcmv1.RBACPolicyReadyCondition, Status: metav1.ConditionFalse, Reason: kcmv1.FailedReason,
+		})
+		mgmtCl := fake.NewClientBuilder().WithScheme(testscheme.Scheme).WithObjects(capiCluster(cd.Name), kubeconfigSecret(cd.Name)).Build()
+		r := &ClusterDeploymentReconciler{
+			MgmtClient: mgmtCl,
+			childClientFactory: func([]byte, *runtime.Scheme) (crclient.Client, error) {
+				return nil, errors.New("child client must not be built for a reference that never synced")
+			},
+		}
+		scope := &clusterScope{cd: cd, rgnClient: mgmtCl}
+
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
+		g.Expect(err).To(Succeed())
+		g.Expect(res).To(Equal(ctrl.Result{}))
+		g.Expect(meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)).NotTo(BeNil())
+	})
+
+	t.Run("an unchanged policy is not re-read until the resync interval elapses", func(t *testing.T) {
+		g := NewWithT(t)
+		cd := newCD(policy.Name, "test-auth")
+		cd.UID = "fresh-cd-uid"
+		mgmtCl := fake.NewClientBuilder().WithScheme(testscheme.Scheme).WithObjects(capiCluster(cd.Name), kubeconfigSecret(cd.Name)).Build()
+		childCl := fake.NewClientBuilder().WithScheme(testscheme.Scheme).Build()
+		calls := 0
+		r := &ClusterDeploymentReconciler{
+			MgmtClient: mgmtCl,
+			childClientFactory: func([]byte, *runtime.Scheme) (crclient.Client, error) {
+				calls++
+				return childCl, nil
+			},
+		}
+		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
+
+		_, err := r.ensureRBACPolicy(t.Context(), scope)
+		g.Expect(err).To(Succeed())
+		g.Expect(calls).To(Equal(1))
+
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
+		g.Expect(err).To(Succeed())
+		g.Expect(calls).To(Equal(1)) // skipped, no child-cluster reads
+		g.Expect(res.RequeueAfter).To(BeNumerically(">", time.Duration(0)))
+
+		// a policy edit bypasses the guard
+		bumped := policy.DeepCopy()
+		bumped.Generation = policy.Generation + 1
+		scope.rbacPolicy = bumped
+		_, err = r.ensureRBACPolicy(t.Context(), scope)
+		g.Expect(err).To(Succeed())
+		g.Expect(calls).To(Equal(2))
 	})
 
 	t.Run("soft-requeues when child kubeconfig Secret is missing", func(t *testing.T) {
@@ -2719,7 +2774,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		r := &ClusterDeploymentReconciler{MgmtClient: mgmtCl, defaultRequeueTime: 5 * time.Second}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		g.Expect(res).To(Equal(ctrl.Result{RequeueAfter: 5 * time.Second}))
 		cond := meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)
@@ -2740,7 +2795,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
 
-		_, err := r.ensureRBACPolicy(context.Background(), scope)
+		_, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(HaveOccurred())
 		cond := meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)
 		g.Expect(cond).NotTo(BeNil())
@@ -2760,7 +2815,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl, rbacPolicy: policy}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		// jittered, so a range rather than an exact interval
 		g.Expect(res.RequeueAfter).To(BeNumerically("~", rbacResyncInterval, rbacResyncInterval/10))
@@ -2771,7 +2826,7 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		g.Expect(cond.Message).To(ContainSubstring("generation"))
 
 		binding := &rbacv1.ClusterRoleBinding{}
-		g.Expect(childCl.Get(context.Background(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, binding)).To(Succeed())
+		g.Expect(childCl.Get(t.Context(), crclient.ObjectKey{Name: "k0rdent-compute-admin"}, binding)).To(Succeed())
 	})
 
 	managedLabels := map[string]string{kcmv1.KCMManagedLabelKey: kcmv1.KCMManagedLabelValue, rbac.ManagedByLabelKey: rbac.ManagedByLabelValue}
@@ -2795,16 +2850,16 @@ func Test_ensureRBACPolicy(t *testing.T) {
 		}
 		scope := &clusterScope{cd: cd, rgnClient: mgmtCl}
 
-		res, err := r.ensureRBACPolicy(context.Background(), scope)
+		res, err := r.ensureRBACPolicy(t.Context(), scope)
 		g.Expect(err).To(Succeed())
 		g.Expect(res).To(Equal(ctrl.Result{}))
 		g.Expect(meta.FindStatusCondition(cd.Status.Conditions, kcmv1.RBACPolicyReadyCondition)).To(BeNil())
 
-		err = childCl.Get(context.Background(), crclient.ObjectKey{Name: "k0rdent-stale"}, &rbacv1.ClusterRoleBinding{})
+		err = childCl.Get(t.Context(), crclient.ObjectKey{Name: "k0rdent-stale"}, &rbacv1.ClusterRoleBinding{})
 		g.Expect(crclient.IgnoreNotFound(err)).To(Succeed())
 		g.Expect(err).To(HaveOccurred())
 
-		err = childCl.Get(context.Background(), crclient.ObjectKey{Name: "custom-admin"}, &rbacv1.ClusterRole{})
+		err = childCl.Get(t.Context(), crclient.ObjectKey{Name: "custom-admin"}, &rbacv1.ClusterRole{})
 		g.Expect(crclient.IgnoreNotFound(err)).To(Succeed())
 		g.Expect(err).To(HaveOccurred())
 	})

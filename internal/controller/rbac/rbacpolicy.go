@@ -62,6 +62,9 @@ func Retriable(err error) bool {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		return slices.ContainsFunc(joined.Unwrap(), Retriable)
 	}
+	if wrapped := errors.Unwrap(err); wrapped != nil {
+		return Retriable(wrapped)
+	}
 	return !errors.Is(err, ErrTerminal)
 }
 
@@ -131,7 +134,10 @@ func applyClusterRole(ctx context.Context, childCl client.Client, name string, r
 	case apierrors.IsNotFound(err):
 		role.Labels = mergeManagedLabels(nil)
 		role.Rules = rules
-		return true, childCl.Create(ctx, role)
+		if err := childCl.Create(ctx, role); err != nil {
+			return false, err
+		}
+		return true, nil
 	case err != nil:
 		return false, err
 	case role.Labels[ManagedByLabelKey] != ManagedByLabelValue:
@@ -158,7 +164,10 @@ func applyClusterRoleBinding(ctx context.Context, childCl client.Client, name, c
 	err := childCl.Get(ctx, client.ObjectKeyFromObject(binding), binding)
 	switch {
 	case apierrors.IsNotFound(err):
-		return true, childCl.Create(ctx, desired(nil))
+		if err := childCl.Create(ctx, desired(nil)); err != nil {
+			return false, err
+		}
+		return true, nil
 	case err != nil:
 		return false, err
 	case binding.RoleRef != desiredRoleRef:
@@ -212,16 +221,8 @@ func Prune(ctx context.Context, childCl client.Client, desiredRoles, desiredBind
 	if err != nil {
 		return false, err
 	}
-	bindingsChanged, err := pruneBindings(ctx, childCl, desiredBindings)
+	bindingsChanged, err := pruneManaged(ctx, childCl, rbacv1.SchemeGroupVersion.WithKind("ClusterRoleBinding"), desiredBindings)
 	return rolesChanged || bindingsChanged, err
-}
-
-// pruneBindings removes ClusterRoleBindings previously created by [Sync] in the child cluster
-// that are no longer present in desiredBindings, without touching ClusterRoles, and reports
-// whether anything was actually deleted. Passing a nil/empty map removes every
-// ClusterRoleBinding this package manages there.
-func pruneBindings(ctx context.Context, childCl client.Client, desiredBindings map[string]struct{}) (bool, error) {
-	return pruneManaged(ctx, childCl, rbacv1.SchemeGroupVersion.WithKind("ClusterRoleBinding"), desiredBindings)
 }
 
 // pruneManaged deletes every ManagedByLabelKey-selected object of the given kind that is not

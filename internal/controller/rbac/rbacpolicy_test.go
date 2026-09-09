@@ -16,6 +16,7 @@ package rbac
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -278,6 +279,26 @@ func TestSync_OneBadBindingDoesNotBlockTheRest(t *testing.T) {
 	g.Expect(childCl.Get(t.Context(), client.ObjectKey{Name: "k0rdent-healthy"}, &rbacv1.ClusterRoleBinding{})).To(Succeed())
 }
 
+// TestRetriable covers the forms callers actually produce, including a joined error rewrapped
+// with fmt.Errorf: a mixed batch must stay retriable so the transient half is retried.
+func TestRetriable(t *testing.T) {
+	g := NewWithT(t)
+
+	terminal := fmt.Errorf("%w: bad binding", ErrTerminal)
+	transient := errors.New("apiserver unavailable")
+	wrap := func(err error) error { return fmt.Errorf("failed to sync RBAC objects: %w", err) }
+
+	g.Expect(Retriable(nil)).To(BeFalse())
+	g.Expect(Retriable(terminal)).To(BeFalse())
+	g.Expect(Retriable(transient)).To(BeTrue())
+	g.Expect(Retriable(errors.Join(terminal, transient))).To(BeTrue())
+	g.Expect(Retriable(wrap(errors.Join(terminal, transient)))).To(BeTrue())
+	g.Expect(Retriable(wrap(errors.Join(terminal, terminal)))).To(BeFalse())
+	g.Expect(Retriable(wrap(errors.Join(transient, transient)))).To(BeTrue())
+	g.Expect(Retriable(wrap(terminal))).To(BeFalse())
+	g.Expect(Retriable(wrap(transient))).To(BeTrue())
+}
+
 func managedLabels() map[string]string {
 	return map[string]string{kcmv1.KCMManagedLabelKey: kcmv1.KCMManagedLabelValue, ManagedByLabelKey: ManagedByLabelValue}
 }
@@ -324,8 +345,8 @@ func TestPrune(t *testing.T) {
 	g.Expect(changed).To(BeFalse())
 }
 
-// TestPruneBindings verifies that pruneBindings, the helper Prune uses for the bindings half of
-// its work, only ever touches ClusterRoleBindings.
+// TestPruneBindings verifies that the bindings half of Prune's work only ever touches
+// ClusterRoleBindings.
 func TestPruneBindings(t *testing.T) {
 	g := NewWithT(t)
 
@@ -341,7 +362,7 @@ func TestPruneBindings(t *testing.T) {
 		WithObjects(managedRole, managedBinding).
 		Build()
 
-	changed, err := pruneBindings(t.Context(), childCl, nil)
+	changed, err := pruneManaged(t.Context(), childCl, rbacv1.SchemeGroupVersion.WithKind("ClusterRoleBinding"), nil)
 	g.Expect(err).To(Succeed())
 	g.Expect(changed).To(BeTrue())
 

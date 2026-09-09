@@ -30,7 +30,6 @@ import (
 func ValidateRBACPolicy(policy *kcmv1.RBACPolicy) error {
 	names := make(map[string]struct{}, len(policy.Spec.Bindings))
 	rolesWithRules := make(map[string]struct{}, len(policy.Spec.Bindings))
-	roleSubjects := make(map[string]map[kcmv1.RBACPolicySubject]struct{}, len(policy.Spec.Bindings))
 	for _, binding := range policy.Spec.Bindings {
 		if _, exists := names[binding.Name]; exists {
 			return fmt.Errorf("duplicate binding name %q", binding.Name)
@@ -45,14 +44,10 @@ func ValidateRBACPolicy(policy *kcmv1.RBACPolicy) error {
 			return fmt.Errorf("binding name %q produces an invalid ClusterRoleBinding name %q: %s", binding.Name, objectName, strings.Join(errs, "; "))
 		}
 
-		seen := roleSubjects[binding.ClusterRole]
-		if seen == nil {
-			seen = make(map[kcmv1.RBACPolicySubject]struct{}, len(binding.Subjects))
-			roleSubjects[binding.ClusterRole] = seen
-		}
+		seen := make(map[kcmv1.RBACPolicySubject]struct{}, len(binding.Subjects))
 		for _, subject := range binding.Subjects {
 			if _, exists := seen[subject]; exists {
-				return fmt.Errorf("binding %q: duplicate subject %s %q for clusterRole %q", binding.Name, subject.Kind, subject.Name, binding.ClusterRole)
+				return fmt.Errorf("binding %q: duplicate subject %s %q", binding.Name, subject.Kind, subject.Name)
 			}
 			seen[subject] = struct{}{}
 		}
