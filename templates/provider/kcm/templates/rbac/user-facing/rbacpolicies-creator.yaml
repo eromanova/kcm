@@ -9,6 +9,4 @@ rules:
       - k0rdent.mirantis.com
     resources:
       - rbacpolicies
-    verbs: {{ include "rbac.viewerVerbs" . | nindent 6 }}
-      - create
-      - delete
+    verbs: {{ include "rbac.editorVerbs" . | nindent 6 }}

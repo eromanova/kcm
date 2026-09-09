@@ -21,14 +21,15 @@ package rbac
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 
 	rbacv1 "k8s.io/api/rbac/v1"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kcmv1 "github.com/K0rdent/kcm/api/v1beta1"
 )
@@ -48,9 +49,26 @@ const (
 	ManagedByLabelValue = "rbac-operator"
 )
 
+// ErrTerminal marks a failure that no amount of retrying can clear — only an RBACPolicy spec edit
+// can. Callers use [Retriable] to decide whether to requeue.
+var ErrTerminal = errors.New("terminal error")
+
+// Retriable reports whether err holds at least one failure worth retrying. A [ErrTerminal]-only
+// error (including a joined one) is not.
+func Retriable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return slices.ContainsFunc(joined.Unwrap(), Retriable)
+	}
+	return !errors.Is(err, ErrTerminal)
+}
+
 // Sync creates/updates the ClusterRoles and ClusterRoleBindings implied by policy's role catalog,
 // and returns the set of object names that are now desired (for use by [Prune]) and whether
-// anything was actually created or updated.
+// anything was actually created or updated. A binding that fails to apply does not stop the rest
+// from being applied; all failures are joined into the returned error.
 func Sync(ctx context.Context, childCl client.Client, policy *kcmv1.RBACPolicy) (desiredRoles, desiredBindings map[string]struct{}, changed bool, _ error) {
 	desiredRoles = make(map[string]struct{})
 	desiredBindings = make(map[string]struct{})
@@ -59,26 +77,36 @@ func Sync(ctx context.Context, childCl client.Client, policy *kcmv1.RBACPolicy) 
 		return desiredRoles, desiredBindings, false, nil
 	}
 
+	// Everything the catalog names stays desired even if applying it fails below, so a transient
+	// error can never make Prune revoke a binding that is still wanted. A ClusterRole is desired
+	// whether or not this binding carries rules: dropping rules from a binding must not delete the
+	// managed ClusterRole its live ClusterRoleBinding still points at.
+	for _, binding := range policy.Spec.Bindings {
+		desiredRoles[binding.ClusterRole] = struct{}{}
+		desiredBindings[kcmv1.ClusterRoleBindingNamePrefix+binding.Name] = struct{}{}
+	}
+
+	var errs []error
 	for _, binding := range policy.Spec.Bindings {
 		if len(binding.Rules) > 0 {
 			roleChanged, err := applyClusterRole(ctx, childCl, binding.ClusterRole, binding.Rules)
 			if err != nil {
-				return nil, nil, false, fmt.Errorf("applying ClusterRole %s: %w", binding.ClusterRole, err)
+				errs = append(errs, fmt.Errorf("applying ClusterRole %s: %w", binding.ClusterRole, err))
+				continue
 			}
 			changed = changed || roleChanged
-			desiredRoles[binding.ClusterRole] = struct{}{}
 		}
 
 		bindingName := kcmv1.ClusterRoleBindingNamePrefix + binding.Name
 		bindingChanged, err := applyClusterRoleBinding(ctx, childCl, bindingName, binding.ClusterRole, toSubjects(binding.Subjects))
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("applying ClusterRoleBinding %s: %w", bindingName, err)
+			errs = append(errs, fmt.Errorf("applying ClusterRoleBinding %s: %w", bindingName, err))
+			continue
 		}
 		changed = changed || bindingChanged
-		desiredBindings[bindingName] = struct{}{}
 	}
 
-	return desiredRoles, desiredBindings, changed, nil
+	return desiredRoles, desiredBindings, changed, errors.Join(errs...)
 }
 
 // toSubjects converts policy subjects into rbacv1.Subjects, filling in the fixed APIGroup
@@ -100,57 +128,69 @@ func applyClusterRole(ctx context.Context, childCl client.Client, name string, r
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	err := childCl.Get(ctx, client.ObjectKeyFromObject(role), role)
 	switch {
-	case err == nil && role.Labels[ManagedByLabelKey] != ManagedByLabelValue:
-		return false, fmt.Errorf("ClusterRole %s already exists and was not created by this RBACPolicy; refusing to overwrite it", name)
-	case client.IgnoreNotFound(err) != nil:
+	case apierrors.IsNotFound(err):
+		role.Labels = mergeManagedLabels(nil)
+		role.Rules = rules
+		return true, childCl.Create(ctx, role)
+	case err != nil:
 		return false, err
+	case role.Labels[ManagedByLabelKey] != ManagedByLabelValue:
+		return false, fmt.Errorf("%w: ClusterRole %s already exists and was not created by this RBACPolicy; refusing to overwrite it", ErrTerminal, name)
 	}
 
-	op, err := controllerutil.CreateOrUpdate(ctx, childCl, role, func() error {
-		role.Labels = mergeManagedLabels(role.Labels)
-		role.Rules = rules
-		return nil
-	})
-	return op != controllerutil.OperationResultNone, err
+	base := role.DeepCopy()
+	role.Labels = mergeManagedLabels(role.Labels)
+	role.Rules = rules
+	return patchIfChanged(ctx, childCl, base, role)
 }
 
 func applyClusterRoleBinding(ctx context.Context, childCl client.Client, name, clusterRoleName string, subjects []rbacv1.Subject) (bool, error) {
 	desiredRoleRef := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: clusterRoleName}
+	desired := func(labels map[string]string) *rbacv1.ClusterRoleBinding {
+		return &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: mergeManagedLabels(labels)},
+			RoleRef:    desiredRoleRef,
+			Subjects:   subjects,
+		}
+	}
 
 	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	err := childCl.Get(ctx, client.ObjectKeyFromObject(binding), binding)
 	switch {
-	case err == nil && binding.RoleRef != desiredRoleRef:
-		// roleRef is immutable on an existing ClusterRoleBinding, so it has to be deleted and
-		// recreated to change it. Deletion in a real cluster can be asynchronous (e.g. a
-		// finalizer), so don't fall through to CreateOrUpdate below: if the old object is still
-		// terminating by the time we get to it, CreateOrUpdate's Get would still find it and then
-		// attempt an Update, hitting the same immutable-roleRef error. Creating explicitly instead
-		// fails cleanly with AlreadyExists in that case, and the caller's normal error-triggers-
-		// retry handling reconciles it again once the old object is actually gone.
+	case apierrors.IsNotFound(err):
+		return true, childCl.Create(ctx, desired(nil))
+	case err != nil:
+		return false, err
+	case binding.RoleRef != desiredRoleRef:
+		// roleRef is immutable, so changing it means delete and recreate. Deletion can be
+		// asynchronous, in which case Create fails with AlreadyExists and the caller's retry
+		// reconciles it once the old object is gone.
 		if err := childCl.Delete(ctx, binding); err != nil {
 			return false, fmt.Errorf("deleting outdated ClusterRoleBinding to change roleRef: %w", err)
 		}
-		recreated := &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: mergeManagedLabels(nil)},
-			RoleRef:    desiredRoleRef,
-			Subjects:   subjects,
-		}
-		if err := childCl.Create(ctx, recreated); err != nil {
+		if err := childCl.Create(ctx, desired(nil)); err != nil {
 			return false, fmt.Errorf("creating ClusterRoleBinding after deleting the outdated one: %w", err)
 		}
 		return true, nil
-	case client.IgnoreNotFound(err) != nil:
-		return false, err
 	}
 
-	op, err := controllerutil.CreateOrUpdate(ctx, childCl, binding, func() error {
-		binding.Labels = mergeManagedLabels(binding.Labels)
-		binding.RoleRef = desiredRoleRef
-		binding.Subjects = subjects
-		return nil
-	})
-	return op != controllerutil.OperationResultNone, err
+	base := binding.DeepCopy()
+	binding.Labels = mergeManagedLabels(binding.Labels)
+	binding.Subjects = subjects
+	return patchIfChanged(ctx, childCl, base, binding)
+}
+
+// patchIfChanged merge-patches obj onto base, reporting whether a write was actually needed.
+func patchIfChanged(ctx context.Context, childCl client.Client, base, obj client.Object) (bool, error) {
+	patch := client.MergeFrom(base)
+	data, err := patch.Data(obj)
+	if err != nil {
+		return false, err
+	}
+	if string(data) == "{}" {
+		return false, nil
+	}
+	return true, childCl.Patch(ctx, obj, patch)
 }
 
 func mergeManagedLabels(existing map[string]string) map[string]string {
@@ -162,17 +202,13 @@ func mergeManagedLabels(existing map[string]string) map[string]string {
 	return existing
 }
 
-func managedSelector() labels.Selector {
-	return labels.SelectorFromSet(map[string]string{ManagedByLabelKey: ManagedByLabelValue})
-}
-
 // Prune removes ClusterRoles and ClusterRoleBindings previously created by [Sync] in the child
 // cluster that are no longer present in desiredRoles/desiredBindings, and reports whether
 // anything was actually deleted. Passing nil/empty maps removes everything this package manages
 // there — used both for normal drift cleanup after a [Sync], and to tear down everything a
 // ClusterDeployment's child cluster once had once it stops referencing an RBACPolicy at all.
 func Prune(ctx context.Context, childCl client.Client, desiredRoles, desiredBindings map[string]struct{}) (bool, error) {
-	rolesChanged, err := pruneManaged(ctx, childCl, &rbacv1.ClusterRoleList{}, desiredRoles, "ClusterRole")
+	rolesChanged, err := pruneManaged(ctx, childCl, rbacv1.SchemeGroupVersion.WithKind("ClusterRole"), desiredRoles)
 	if err != nil {
 		return false, err
 	}
@@ -185,32 +221,28 @@ func Prune(ctx context.Context, childCl client.Client, desiredRoles, desiredBind
 // whether anything was actually deleted. Passing a nil/empty map removes every
 // ClusterRoleBinding this package manages there.
 func pruneBindings(ctx context.Context, childCl client.Client, desiredBindings map[string]struct{}) (bool, error) {
-	return pruneManaged(ctx, childCl, &rbacv1.ClusterRoleBindingList{}, desiredBindings, "ClusterRoleBinding")
+	return pruneManaged(ctx, childCl, rbacv1.SchemeGroupVersion.WithKind("ClusterRoleBinding"), desiredBindings)
 }
 
-// pruneManaged deletes every ManagedByLabelKey-selected item in list not present in desired,
-// reporting whether anything was deleted. kind is used only for error messages.
-func pruneManaged(ctx context.Context, childCl client.Client, list client.ObjectList, desired map[string]struct{}, kind string) (bool, error) {
-	if err := childCl.List(ctx, list, &client.ListOptions{LabelSelector: managedSelector()}); err != nil {
-		return false, fmt.Errorf("listing %ss: %w", kind, err)
-	}
-
-	items, err := apimeta.ExtractList(list)
-	if err != nil {
-		return false, fmt.Errorf("extracting %s list: %w", kind, err)
+// pruneManaged deletes every ManagedByLabelKey-selected object of the given kind that is not
+// present in desired, reporting whether anything was deleted. It lists metadata only, since names
+// are all it needs.
+func pruneManaged(ctx context.Context, childCl client.Client, gvk schema.GroupVersionKind, desired map[string]struct{}) (bool, error) {
+	list := &metav1.PartialObjectMetadataList{}
+	list.SetGroupVersionKind(gvk)
+	if err := childCl.List(ctx, list, client.MatchingLabels{ManagedByLabelKey: ManagedByLabelValue}); err != nil {
+		return false, fmt.Errorf("listing %ss: %w", gvk.Kind, err)
 	}
 
 	changed := false
-	for _, item := range items {
-		obj, ok := item.(client.Object)
-		if !ok {
-			return changed, fmt.Errorf("unexpected %s list item type %T", kind, item)
-		}
+	for i := range list.Items {
+		obj := &list.Items[i]
 		if _, ok := desired[obj.GetName()]; ok {
 			continue
 		}
+		obj.SetGroupVersionKind(gvk)
 		if err := childCl.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-			return changed, fmt.Errorf("deleting stale %s %s: %w", kind, obj.GetName(), err)
+			return changed, fmt.Errorf("deleting stale %s %s: %w", gvk.Kind, obj.GetName(), err)
 		}
 		changed = true
 	}

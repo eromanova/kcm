@@ -75,6 +75,54 @@ func TestValidateRBACPolicy(t *testing.T) {
 			err: `clusterRole "custom" has rules defined in more than one binding`,
 		},
 		{
+			name: "clusterRole carrying rules must be a valid object name",
+			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
+				Bindings: []kcmv1.RBACPolicyBinding{
+					{Name: "compute-admin", ClusterRole: "My Custom Role", Rules: []rbacv1.PolicyRule{{Verbs: []string{"get"}}}},
+				},
+			})),
+			err: `clusterRole "My Custom Role" is not a valid ClusterRole name`,
+		},
+		{
+			name: "clusterRole without rules is not constrained to an object name",
+			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
+				Bindings: []kcmv1.RBACPolicyBinding{
+					{Name: "compute-admin", ClusterRole: "system:aggregate-to-view"},
+				},
+			})),
+		},
+		{
+			name: "duplicate subject within a binding",
+			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
+				Bindings: []kcmv1.RBACPolicyBinding{
+					{Name: "compute-admin", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{
+						{Kind: rbacv1.UserKind, Name: "alice"},
+						{Kind: rbacv1.UserKind, Name: "alice"},
+					}},
+				},
+			})),
+			err: `duplicate subject User "alice" for clusterRole "admin"`,
+		},
+		{
+			name: "same subject in two bindings for the same clusterRole",
+			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
+				Bindings: []kcmv1.RBACPolicyBinding{
+					{Name: "compute-admin", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
+					{Name: "compute-admin-2", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
+				},
+			})),
+			err: `duplicate subject User "alice" for clusterRole "admin"`,
+		},
+		{
+			name: "same subject for different clusterRoles is valid",
+			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
+				Bindings: []kcmv1.RBACPolicyBinding{
+					{Name: "compute-admin", ClusterRole: "admin", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
+					{Name: "compute-viewer", ClusterRole: "view", Subjects: []kcmv1.RBACPolicySubject{{Kind: rbacv1.UserKind, Name: "alice"}}},
+				},
+			})),
+		},
+		{
 			name: "binding name with uppercase characters is invalid",
 			policy: rbacpolicy.New(rbacpolicy.WithSpec(kcmv1.RBACPolicySpec{
 				Bindings: []kcmv1.RBACPolicyBinding{

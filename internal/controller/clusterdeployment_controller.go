@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/json"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/wait"
 	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
 	clusterapiv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/external"
@@ -260,28 +261,38 @@ func (r *ClusterDeploymentReconciler) getClusterScope(ctx context.Context, cd *k
 	if cd.Spec.RBACPolicy != "" {
 		rbacPolicy := &kcmv1.RBACPolicy{}
 		rbacPolicyKey := client.ObjectKey{Namespace: cd.Namespace, Name: cd.Spec.RBACPolicy}
-		if err := r.MgmtClient.Get(ctx, rbacPolicyKey, rbacPolicy); err != nil {
+		switch err := r.MgmtClient.Get(ctx, rbacPolicyKey, rbacPolicy); {
+		case apierrors.IsNotFound(err):
+			// A missing policy grants nothing, so leave scope.rbacPolicy nil and let
+			// ensureRBACPolicy revoke. Erroring out here instead would block the rest of the
+			// reconcile behind a condition only a spec edit could clear.
+			err = fmt.Errorf("RBACPolicy %s not found, revoking the RBAC objects it granted", rbacPolicyKey)
+			if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
+				r.warnf(cd, "RBACPolicyError", err.Error())
+			}
+			l.Info("RBACPolicy not found", "RBACPolicy", rbacPolicyKey)
+		case err != nil:
 			err = fmt.Errorf("failed to get RBACPolicy %s: %w", rbacPolicyKey, err)
 			if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
 				r.warnf(cd, "RBACPolicyError", err.Error())
 			}
 			return nil, err
-		}
-
-		if r.IsDisabledValidationWH {
-			if err := validationutil.ValidateRBACPolicy(rbacPolicy); err != nil {
-				if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
-					r.warnf(cd, "RBACPolicyError", err.Error())
+		default:
+			if r.IsDisabledValidationWH {
+				if err := validationutil.ValidateRBACPolicy(rbacPolicy); err != nil {
+					if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
+						r.warnf(cd, "RBACPolicyError", err.Error())
+					}
+					l.Error(err, "RBACPolicy is invalid", "RBACPolicy", rbacPolicyKey)
+					return nil, errNoRetrigger
 				}
-				l.Error(err, "RBACPolicy is invalid", "RBACPolicy", rbacPolicyKey)
-				return nil, errNoRetrigger
 			}
-		}
 
-		// NOTE: RBACPolicyReadyCondition is deliberately not set to True here — the reference is
-		// only valid so far, it hasn't been synced to the child cluster yet. ensureRBACPolicy owns
-		// setting it True once the sync actually succeeds.
-		scope.rbacPolicy = rbacPolicy
+			// NOTE: RBACPolicyReadyCondition is deliberately not set to True here — the reference is
+			// only valid so far, it hasn't been synced to the child cluster yet. ensureRBACPolicy owns
+			// setting it True once the sync actually succeeds.
+			scope.rbacPolicy = rbacPolicy
+		}
 	}
 
 	if cd.Spec.AuditPolicy != "" {
@@ -480,15 +491,30 @@ func (r *ClusterDeploymentReconciler) updateCluster(
 		return ctrl.Result{RequeueAfter: r.defaultRequeueTime}, nil
 	}
 
-	helmResult, err := r.reconcileHelmRelease(ctx, clusterTpl, scope)
-	if err != nil {
+	// RBAC distribution only needs the child kubeconfig, not a fully ready cluster, so it runs
+	// regardless of the helm result: gating it would stall grants and, worse, revocations while a
+	// cluster is mid-upgrade or has a single NotReady machine.
+	helmResult, helmErr := r.reconcileHelmRelease(ctx, clusterTpl, scope)
+	rbacResult, rbacErr := r.ensureRBACPolicy(ctx, scope)
+	if err := errors.Join(helmErr, rbacErr); err != nil {
 		return ctrl.Result{}, err
 	}
-	if !helmResult.IsZero() {
-		return helmResult, nil
-	}
 
-	return r.ensureRBACPolicy(ctx, scope)
+	return soonerResult(helmResult, rbacResult), nil
+}
+
+// soonerResult merges two reconcile results, keeping the earliest requeue either asks for.
+func soonerResult(a, b ctrl.Result) ctrl.Result {
+	res := ctrl.Result{Requeue: a.Requeue || b.Requeue} //nolint:staticcheck // matches ctrl.Result
+	switch {
+	case a.RequeueAfter == 0:
+		res.RequeueAfter = b.RequeueAfter
+	case b.RequeueAfter == 0:
+		res.RequeueAfter = a.RequeueAfter
+	default:
+		res.RequeueAfter = min(a.RequeueAfter, b.RequeueAfter)
+	}
+	return res
 }
 
 func (r *ClusterDeploymentReconciler) validateAndPrepareCluster(
@@ -1122,48 +1148,28 @@ func (r *ClusterDeploymentReconciler) ensureAuditPolicyConfigMap(ctx context.Con
 
 // rbacResyncInterval is how often ensureRBACPolicy re-syncs a ClusterDeployment's child-cluster
 // RBAC objects even without any triggering event, since nothing else watches the child cluster
-// for drift on these objects.
+// for drift on these objects. Jittered per call so a controller restart doesn't lock every
+// ClusterDeployment into the same phase.
 const rbacResyncInterval = 5 * time.Minute
 
+func jitteredRBACResync() time.Duration {
+	const jitter = 0.1
+	return wait.Jitter(time.Duration(float64(rbacResyncInterval)*(1-jitter)), 2*jitter)
+}
+
 // ensureRBACPolicy syncs the ClusterRoles and ClusterRoleBindings described by the RBACPolicy
-// referenced from spec.rbacPolicy into the ClusterDeployment's child cluster. RBAC is never
-// distributed to a ClusterDeployment with no CAPI Cluster object (e.g. an adopted cluster) — CAPI
-// is what produces the kubeconfig Secret this needs, and a Cluster-less ClusterDeployment will
-// never get one — that case is treated the same as an unreferenced policy, silently.
+// referenced from spec.rbacPolicy into the ClusterDeployment's child cluster, and revokes them
+// once that reference is gone.
 func (r *ClusterDeploymentReconciler) ensureRBACPolicy(ctx context.Context, scope *clusterScope) (ctrl.Result, error) {
+	l := ctrl.LoggerFrom(ctx)
 	cd := scope.cd
 
-	active := cd.Spec.RBACPolicy != "" && scope.rbacPolicy != nil
-
-	if active {
-		capiCluster, err := r.getPartialCapiCluster(ctx, scope.rgnClient, cd)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to check for CAPI Cluster: %w", err)
-		}
-		active = capiCluster != nil
-	}
-
-	if !active {
-		if apimeta.FindStatusCondition(*cd.GetConditions(), kcmv1.RBACPolicyReadyCondition) == nil {
-			return ctrl.Result{}, nil
-		}
-
-		// RBACPolicy was cleared, or there's no CAPI Cluster to distribute RBAC to at all: this is
-		// the only way ensureRBACPolicy ever stops managing a ClusterDeployment's RBAC, so it's
-		// safe to remove everything this controller previously created in the child cluster —
-		// ClusterRoles included, not just the ClusterRoleBindings.
-		childCl, err := r.childClientFor(ctx, scope.rgnClient, cd)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to get child cluster client for RBAC cleanup: %w", err)
-		}
-		if childCl != nil {
-			if _, err := rbac.Prune(ctx, childCl, nil, nil); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to revoke RBAC objects: %w", err)
-			}
-		}
-
-		apimeta.RemoveStatusCondition(cd.GetConditions(), kcmv1.RBACPolicyReadyCondition)
-		return ctrl.Result{}, nil
+	// nil covers both "spec.rbacPolicy was cleared" and "the referenced RBACPolicy is gone";
+	// either way nothing is granted any more. Deliberately not keyed on the CAPI Cluster: a
+	// Cluster deleted out-of-band is an anomaly to report, not a signal to strip access from a
+	// still-reachable child cluster.
+	if scope.rbacPolicy == nil {
+		return ctrl.Result{}, r.revokeRBACPolicy(ctx, scope)
 	}
 
 	childCl, err := r.childClientFor(ctx, scope.rgnClient, cd)
@@ -1175,39 +1181,77 @@ func (r *ClusterDeploymentReconciler) ensureRBACPolicy(ctx context.Context, scop
 		return ctrl.Result{}, err
 	}
 	if childCl == nil {
-		// Transient and expected during normal provisioning (CAPI hasn't produced the kubeconfig
-		// Secret yet) — Unknown, not False, so it isn't reported as a hard failure on the
-		// aggregate ClusterDeployment Ready condition the way a real sync error is.
+		// No kubeconfig Secret yet. With no CAPI Cluster either (e.g. an adopted cluster) there
+		// never will be one, so opt out rather than requeue forever.
+		capiCluster, err := r.getPartialCapiCluster(ctx, scope.rgnClient, cd)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to check for CAPI Cluster: %w", err)
+		}
+		if capiCluster == nil {
+			l.V(1).Info("No CAPI Cluster and no child kubeconfig, skipping RBACPolicy sync", "RBACPolicy", scope.rbacPolicy.Name)
+			return ctrl.Result{}, nil
+		}
+
+		// Transient and expected during normal provisioning — Unknown, not False, so it isn't
+		// reported as a hard failure on the aggregate ClusterDeployment Ready condition.
 		if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.ProgressingReason, metav1.ConditionUnknown, errors.New("child cluster kubeconfig not ready yet")) {
 			r.warnf(cd, "RBACChildKubeconfigNotReady", "child cluster kubeconfig not ready yet, retrying")
 		}
 		return ctrl.Result{RequeueAfter: r.defaultRequeueTime}, nil
 	}
 
-	desiredRoles, desiredBindings, syncChanged, err := rbac.Sync(ctx, childCl, scope.rbacPolicy)
-	if err != nil {
+	desiredRoles, desiredBindings, syncChanged, syncErr := rbac.Sync(ctx, childCl, scope.rbacPolicy)
+	pruneChanged, pruneErr := rbac.Prune(ctx, childCl, desiredRoles, desiredBindings)
+	if err := errors.Join(syncErr, pruneErr); err != nil {
 		err = fmt.Errorf("failed to sync RBAC objects: %w", err)
 		if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
 			r.warnf(cd, "RBACSyncFailed", err.Error())
 		}
-		return ctrl.Result{}, err
-	}
-
-	pruneChanged, err := rbac.Prune(ctx, childCl, desiredRoles, desiredBindings)
-	if err != nil {
-		err = fmt.Errorf("failed to prune stale RBAC objects: %w", err)
-		if r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.FailedReason, metav1.ConditionFalse, err) {
-			r.warnf(cd, "RBACSyncFailed", err.Error())
+		if !rbac.Retriable(err) {
+			// Only an RBACPolicy edit can clear this; retrying just burns the rate limiter.
+			l.Error(err, "RBACPolicy cannot be applied, will not retrigger this error")
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	r.setCondition(cd, kcmv1.RBACPolicyReadyCondition, kcmv1.SucceededReason, metav1.ConditionTrue, nil)
-	if syncChanged || pruneChanged {
+	// The applied generation goes in the message so the condition changes when the policy does,
+	// letting a user (or kubectl wait) tell which revision actually reached the child cluster.
+	if apimeta.SetStatusCondition(cd.GetConditions(), metav1.Condition{
+		Type:               kcmv1.RBACPolicyReadyCondition,
+		Status:             metav1.ConditionTrue,
+		Reason:             kcmv1.SucceededReason,
+		Message:            fmt.Sprintf("RBACPolicy %s generation %d applied", scope.rbacPolicy.Name, scope.rbacPolicy.Generation),
+		ObservedGeneration: cd.Generation,
+	}) && (syncChanged || pruneChanged) {
 		r.eventf(cd, "RBACSynced", "ClusterRoles and ClusterRoleBindings synced to the child cluster")
 	}
 
-	return ctrl.Result{RequeueAfter: rbacResyncInterval}, nil
+	return ctrl.Result{RequeueAfter: jitteredRBACResync()}, nil
+}
+
+// revokeRBACPolicy removes everything [rbac.Sync] previously created in cd's child cluster.
+func (r *ClusterDeploymentReconciler) revokeRBACPolicy(ctx context.Context, scope *clusterScope) error {
+	cd := scope.cd
+	if apimeta.FindStatusCondition(*cd.GetConditions(), kcmv1.RBACPolicyReadyCondition) == nil {
+		return nil
+	}
+
+	childCl, err := r.childClientFor(ctx, scope.rgnClient, cd)
+	if err != nil {
+		return fmt.Errorf("failed to get child cluster client for RBAC cleanup: %w", err)
+	}
+	if childCl != nil {
+		if _, err := rbac.Prune(ctx, childCl, nil, nil); err != nil {
+			return fmt.Errorf("failed to revoke RBAC objects: %w", err)
+		}
+	}
+
+	// A dangling spec.rbacPolicy keeps its False condition so the broken reference stays visible.
+	if cd.Spec.RBACPolicy == "" {
+		apimeta.RemoveStatusCondition(cd.GetConditions(), kcmv1.RBACPolicyReadyCondition)
+	}
+	return nil
 }
 
 // childClientFor returns a client for cd's child cluster (built from its CAPI-generated

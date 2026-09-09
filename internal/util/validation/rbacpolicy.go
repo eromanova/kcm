@@ -30,25 +30,40 @@ import (
 func ValidateRBACPolicy(policy *kcmv1.RBACPolicy) error {
 	names := make(map[string]struct{}, len(policy.Spec.Bindings))
 	rolesWithRules := make(map[string]struct{}, len(policy.Spec.Bindings))
+	roleSubjects := make(map[string]map[kcmv1.RBACPolicySubject]struct{}, len(policy.Spec.Bindings))
 	for _, binding := range policy.Spec.Bindings {
 		if _, exists := names[binding.Name]; exists {
 			return fmt.Errorf("duplicate binding name %q", binding.Name)
 		}
 		names[binding.Name] = struct{}{}
 
-		// binding.Name is concatenated into the generated ClusterRoleBinding's metadata.name
-		// (kcmv1.ClusterRoleBindingNamePrefix + binding.Name), which the child cluster's API
-		// server requires to be a valid DNS-1123 subdomain (also bounding its length). Checking
-		// the combined form here, rather than binding.Name in isolation, fails fast with a clear
-		// error instead of the binding only failing much later when the operator tries to apply
-		// it to the child cluster.
+		// binding.Name is concatenated into the generated ClusterRoleBinding's metadata.name, which
+		// the child cluster's API server requires to be a valid DNS-1123 subdomain. Checking the
+		// combined form here fails fast instead of only when the operator applies it.
 		objectName := kcmv1.ClusterRoleBindingNamePrefix + binding.Name
 		if errs := apivalidation.IsDNS1123Subdomain(objectName); len(errs) > 0 {
 			return fmt.Errorf("binding name %q produces an invalid ClusterRoleBinding name %q: %s", binding.Name, objectName, strings.Join(errs, "; "))
 		}
 
+		seen := roleSubjects[binding.ClusterRole]
+		if seen == nil {
+			seen = make(map[kcmv1.RBACPolicySubject]struct{}, len(binding.Subjects))
+			roleSubjects[binding.ClusterRole] = seen
+		}
+		for _, subject := range binding.Subjects {
+			if _, exists := seen[subject]; exists {
+				return fmt.Errorf("binding %q: duplicate subject %s %q for clusterRole %q", binding.Name, subject.Kind, subject.Name, binding.ClusterRole)
+			}
+			seen[subject] = struct{}{}
+		}
+
 		if len(binding.Rules) == 0 {
 			continue
+		}
+		// With rules set, binding.ClusterRole names a ClusterRole this operator creates, so it has
+		// to be a valid object name too.
+		if errs := apivalidation.IsDNS1123Subdomain(binding.ClusterRole); len(errs) > 0 {
+			return fmt.Errorf("binding %q: clusterRole %q is not a valid ClusterRole name: %s", binding.Name, binding.ClusterRole, strings.Join(errs, "; "))
 		}
 		if _, exists := rolesWithRules[binding.ClusterRole]; exists {
 			return fmt.Errorf("clusterRole %q has rules defined in more than one binding", binding.ClusterRole)
